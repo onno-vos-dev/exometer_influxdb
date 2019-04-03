@@ -17,7 +17,7 @@
 
 -ifdef(TEST).
 -export([evaluate_subscription_options/5,
-         make_packet/5]).
+         make_packet/6]).
 -endif.
 
 -include_lib("exometer_core/include/exometer.hrl").
@@ -35,6 +35,7 @@
 -define(DEFAULT_BATCH_WINDOW_SIZE, 0).
 -define(DEFAULT_AUTOSUBSCRIBE, false).
 -define(DEFAULT_SUBSCRIPTIONS_MOD, undefined).
+-define(DEFAULT_SEPERATOR, "_").
 
 -define(VALID_PRECISIONS, [n, u, ms, s, m, h]).
 
@@ -64,7 +65,9 @@
                 metrics :: map(),
                 autosubscribe :: boolean(),
                 subscriptions_module :: module(),
-                connection :: gen_udp:socket() | reference()}).
+                connection :: gen_udp:socket() | reference(),
+                name_seperator :: string()
+               }).
 -type state() :: #state{}.
 
 
@@ -87,7 +90,8 @@ exometer_init(Opts) ->
     Formatting = get_opt(formatting, Opts, ?DEFAULT_FORMATTING),
     Autosubscribe = get_opt(autosubscribe, Opts, ?DEFAULT_AUTOSUBSCRIBE),
     SubscriptionsMod = get_opt(subscriptions_module, Opts, ?DEFAULT_SUBSCRIPTIONS_MOD),
-    MergedTags = merge_tags([{<<"host">>, net_adm:localhost()}], Tags),
+    NameSeperator = get_opt(name_seperator, Opts, ?DEFAULT_SEPERATOR),
+    MergedTags = merge_tags([{<<"host">>, net_adm:localhost()}, {<<"node">>, node()}], Tags),
     State =  #state{protocol = Protocol,
                     db = DB,
                     username = Username,
@@ -102,7 +106,9 @@ exometer_init(Opts) ->
                     batch_window_size = BatchWinSize,
                     autosubscribe = Autosubscribe,
                     subscriptions_module = SubscriptionsMod,
-                    metrics = maps:new()},
+                    metrics = maps:new(),
+                    name_seperator = NameSeperator
+                   },
     code:load_file(hackney_tcp),
     code:load_file(hackney_ssl),
     case connect(Protocol, Host, Port, Username, Password) of
@@ -176,10 +182,12 @@ exometer_info({exometer_influxdb, reconnect}, State) ->
     reconnect(State);
 exometer_info({exometer_influxdb, send}, 
               #state{precision = Precision,
-                     collected_metrics = CollectedMetrics} = State) ->
+                     collected_metrics = CollectedMetrics,
+                     name_seperator = NameSeperator
+                    } = State) ->
     if CollectedMetrics /= #{} ->
-        Packets = [make_packet(MetricName, Tags, Fileds, Timestamping, Precision) ++ "\n"
-                   || {_, {MetricName, Tags, Fileds, Timestamping}} 
+        Packets = [make_packet(MetricName, NameSeperator, Tags, Fileds, Timestamping, Precision) ++ "\n"
+                   || {_, {MetricName, Tags, Fileds, Timestamping}}
                       <- maps:to_list(CollectedMetrics)],
         send(Packets, State#state{collected_metrics = #{}});
     true -> {ok, State}
@@ -299,8 +307,8 @@ maybe_send(OriginMetricName, MetricName, Tags0, Fields,
     maps:size(CollectedMetrics) == 0 andalso prepare_batch_send(BatchWinSize),
     {ok, State#state{collected_metrics = NewCollectedMetrics}};
 maybe_send(_, MetricName, Tags, Fields,
-           #state{timestamping = Timestamping, precision = Precision} = State) ->
-    Packet = make_packet(MetricName, Tags, Fields, Timestamping, Precision),
+           #state{timestamping = Timestamping, precision = Precision, name_seperator = NameSeperator} = State) ->
+    Packet = make_packet(MetricName, NameSeperator, Tags, Fields, Timestamping, Precision),
     send(Packet, State).
 
 -spec send(binary() | list(), state()) ->
@@ -397,10 +405,10 @@ unix_time(m)  -> convert_time_unit(microsecs(), minutes);
 unix_time(h)  -> convert_time_unit(microsecs(), hours);
 unix_time(_)  -> undefined.
 
--spec metric_to_string(list()) -> string().
-metric_to_string([Final]) -> metric_elem_to_list(Final);
-metric_to_string([H | T]) ->
-    metric_elem_to_list(H) ++ "_" ++ metric_to_string(T).
+-spec metric_to_string(list(), string()) -> string().
+metric_to_string([Final], _Sep) -> metric_elem_to_list(Final);
+metric_to_string([H | T], Sep) ->
+    metric_elem_to_list(H) ++ Sep ++ metric_to_string(T, Sep).
 
 -spec metric_elem_to_list(atom() | string() | integer()) -> string().
 metric_elem_to_list(E) when is_atom(E) -> atom_to_list(E);
@@ -408,10 +416,10 @@ metric_elem_to_list(E) when is_binary(E) -> binary_to_list(E);
 metric_elem_to_list(E) when is_list(E) -> E;
 metric_elem_to_list(E) when is_integer(E) -> integer_to_list(E).
 
--spec name(exometer_report:metric() | atom() | binary()) -> binary().
-name(Metric) when is_atom(Metric) -> atom_to_binary(Metric, utf8);
-name(Metric) when is_binary(Metric) -> Metric;
-name(Metric) -> iolist_to_binary(metric_to_string(Metric)).
+-spec name(exometer_report:metric() | atom() | binary(), string()) -> binary().
+name(Metric, _Sep) when is_atom(Metric) -> atom_to_binary(Metric, utf8);
+name(Metric, _Sep) when is_binary(Metric) -> Metric;
+name(Metric, Sep) -> iolist_to_binary(metric_to_string(Metric, Sep)).
 
 -spec key(integer() | atom() | list() | binary()) -> binary().
 key(K) when is_integer(K) -> key(integer_to_binary(K));
@@ -442,21 +450,21 @@ flatten_tags(Tags) ->
                     [Acc, ?SEP(Acc), key(K), $=, key(V)]
                 end, [], lists:keysort(1, Tags)).
 
--spec make_packet(exometer_report:metric(), map() | list(),
-                  map(), boolean() | non_neg_integer(), precision()) -> 
+-spec make_packet(exometer_report:metric(), string(), map() | list(),
+                  map(), boolean() | non_neg_integer(), precision()) ->
     list().
-make_packet(Measurement, Tags, Fields, Timestamping, Precision) ->
+make_packet(Measurement, NameSeperator, Tags, Fields, Timestamping, Precision) ->
     BinaryTags = flatten_tags(Tags),
     BinaryFields = flatten_fields(Fields),
     case Timestamping of
         false ->
-            [name(Measurement), ?SEP(BinaryTags), BinaryTags, " ",
+            [name(Measurement, NameSeperator), ?SEP(BinaryTags), BinaryTags, " ",
             BinaryFields, " "];
         true ->
-            [name(Measurement), ?SEP(BinaryTags), BinaryTags, " ",
+            [name(Measurement, NameSeperator), ?SEP(BinaryTags), BinaryTags, " ",
             BinaryFields, " ", integer_to_binary(unix_time(Precision))];
         Timestamp when is_integer(Timestamp) -> % for batch sending with timestamp
-            [name(Measurement), ?SEP(BinaryTags), BinaryTags, " ",
+            [name(Measurement, NameSeperator), ?SEP(BinaryTags), BinaryTags, " ",
             BinaryFields, " ", integer_to_binary(Timestamp)]
     end.
 

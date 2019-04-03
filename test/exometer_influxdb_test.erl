@@ -4,7 +4,7 @@
 -include_lib("exometer_core/include/exometer.hrl").
 
 -import(exometer_report_influxdb, [evaluate_subscription_options/5,
-                                   make_packet/5]).
+                                   make_packet/6]).
 
 
 evaluate_subscription_options(MetricId, Options) ->
@@ -146,4 +146,4 @@ subscribtions_module_test() ->
     ok.
 
 make_bin_packet(Name, Tags, Fields, Timestamping, Precision) ->
-    binary:list_to_bin(make_packet(Name, Tags, Fields, Timestamping, Precision)).
+    binary:list_to_bin(make_packet(Name, "_", Tags, Fields, Timestamping, Precision)).
