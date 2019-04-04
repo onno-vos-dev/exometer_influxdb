@@ -545,7 +545,7 @@ evaluate_subscription_formatting({MetricId, Tags, FromNameIndices}, FormattingOp
     ToPurge = proplists:get_value(purge, FormattingOpts, []),
     KeysToPurge = proplists:get_all_values(tag_keys, ToPurge),
     ValuesToPurge = proplists:get_all_values(tag_values, ToPurge),
-    FormattingMfa = proplists:get_value(mfa, FormattingOpts),
+    FormatterMF = proplists:get_value(module_function, FormattingOpts),
     PurgedTags = [{TagKey, TagValue} || {TagKey, TagValue} <- Tags,
                                         lists:member(TagKey, KeysToPurge) == false,
                                         lists:member(TagValue, ValuesToPurge) == false],
@@ -554,7 +554,7 @@ evaluate_subscription_formatting({MetricId, Tags, FromNameIndices}, FormattingOp
                           true  -> del_indices(MetricId, FromNameIndices);
                           false -> MetricId
                      end,
-    MetricId1 = case FormattingMfa of
+    MetricId1 = case FormatterMF of
                           undefined  -> MetricId0;
                           {M, F} -> M:F(MetricId)
                      end,
